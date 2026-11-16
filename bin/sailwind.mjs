@@ -8,58 +8,18 @@
 // Designed to be driven by agents: plain output, non-zero exit on failure,
 // and --json for machine-readable results.
 
-import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CliError, createGitlabRepo, has, helpText, parse, rewriteStarterPackage, run, validateName } from './lib.mjs'
 
 const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'))
 const STARTER_REPO = process.env.SAILWIND_STARTER_REPO || 'pglevy/sailwind-starter'
 const GITLAB_HOST = process.env.SAILWIND_GITLAB_HOST || 'gitlab.appian-stratus.com'
 
-const HELP = `sailwind ${pkg.version}
-
-Usage:
-  sailwind new <name> [options]   Create a project from sailwind-starter
-  sailwind doctor                 Check prerequisites (node, pnpm, git, glab)
-
-Options for "new":
-  --dest <dir>      Parent directory (default: ~/Documents)
-  --ref <ref>       Starter branch/tag to use (default: main)
-  --gitlab          Also create a repo on ${GITLAB_HOST} (needs glab) and push
-  --private         With --gitlab: private instead of internal visibility
-  --group <group>   With --gitlab: create under this group instead of your namespace
-  --no-push         With --gitlab: create the repo and set origin, but don't push
-  --no-install      Skip pnpm install
-  --json            Print a JSON result on the last line
-  -h, --help        Show this help
-`
-
+const HELP = helpText({ version: pkg.version, gitlabHost: GITLAB_HOST })
 const log = (m) => console.log(m)
-const die = (m) => { console.error(`error: ${m}`); process.exit(1) }
-const has = (cmd) => spawnSync(cmd, ['--version'], { stdio: 'ignore' }).status === 0
-function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { stdio: 'inherit', ...opts })
-  if (r.status !== 0) die(`\`${cmd} ${args.join(' ')}\` failed`)
-}
-
-function parse(argv) {
-  const o = { _: [] }
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (a === '--dest') o.dest = argv[++i]
-    else if (a === '--ref') o.ref = argv[++i]
-    else if (a === '--group') o.group = argv[++i]
-    else if (['--gitlab', '--private', '--no-install', '--no-push', '--json'].includes(a)) {
-      o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true
-    }
-    else if (a === '-h' || a === '--help') o.help = true
-    else if (a.startsWith('-')) die(`unknown option ${a}\n\n${HELP}`)
-    else o._.push(a)
-  }
-  return o
-}
 
 function doctor() {
   const checks = [
@@ -79,21 +39,18 @@ function doctor() {
 
 async function scaffold(o) {
   const name = o._[1]
-  if (!name) die(`missing project name\n\n${HELP}`)
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) die('name may only contain letters, numbers, ".", "_" and "-"')
-  for (const c of ['git', 'tar']) if (!has(c)) die(`${c} not found (run \`sailwind doctor\`)`)
-  if (o.gitlab && !has('glab')) die('--gitlab needs glab (run `sailwind doctor`)')
-  if ((o.private || o.group || o.noPush) && !o.gitlab) die('--private, --group and --no-push only apply with --gitlab')
-  if (o.group === undefined && process.argv.includes('--group')) die('--group needs a value')
+  validateName(name)
+  for (const c of ['git', 'tar']) if (!has(c)) throw new CliError(`${c} not found (run \`sailwind doctor\`)`)
+  if (o.gitlab && !has('glab')) throw new CliError('--gitlab needs glab (run `sailwind doctor`)')
 
   const parent = resolve((o.dest || join(homedir(), 'Documents')).replace(/^~(?=\/|$)/, homedir()))
   const dest = join(parent, name)
-  if (existsSync(dest)) die(`directory already exists: ${dest}`)
+  if (existsSync(dest)) throw new CliError(`directory already exists: ${dest}`)
 
   const ref = o.ref || 'main'
   log(`→ Downloading ${STARTER_REPO}@${ref}...`)
   const res = await fetch(`https://codeload.github.com/${STARTER_REPO}/tar.gz/${ref}`)
-  if (!res.ok) die(`download failed: HTTP ${res.status}`)
+  if (!res.ok) throw new CliError(`download failed: HTTP ${res.status}`)
   const tmp = mkdtempSync(join(tmpdir(), 'sailwind-new-'))
   try {
     const tarball = join(tmp, 'starter.tar.gz')
@@ -105,16 +62,13 @@ async function scaffold(o) {
     rmSync(tmp, { recursive: true, force: true })
   }
 
-  // Keep the starter current: pin the library to the version of this CLI.
   const pj = join(dest, 'package.json')
-  const starter = JSON.parse(readFileSync(pj, 'utf8'))
-  starter.name = name
-  if (starter.dependencies?.['@pglevy/sailwind']) starter.dependencies['@pglevy/sailwind'] = `^${pkg.version}`
+  const starter = rewriteStarterPackage(JSON.parse(readFileSync(pj, 'utf8')), name, pkg.version)
   writeFileSync(pj, JSON.stringify(starter, null, 2) + '\n')
   log(`✓ Created ${dest} (@pglevy/sailwind ^${pkg.version})`)
 
   if (!o.noInstall) {
-    if (!has('pnpm')) die('pnpm not found (run `sailwind doctor`), or pass --no-install')
+    if (!has('pnpm')) throw new CliError('pnpm not found (run `sailwind doctor`), or pass --no-install')
     log('→ pnpm install...')
     run('pnpm', ['install'], { cwd: dest })
   }
@@ -129,31 +83,9 @@ async function scaffold(o) {
 
   let remote = null
   if (o.gitlab) {
-    const env = { ...process.env, GITLAB_HOST }
-    let ns = o.group
-    if (!ns) {
-      const who = spawnSync('glab', ['api', 'user'], { env, encoding: 'utf8' })
-      try { ns = who.status === 0 ? JSON.parse(who.stdout).username : null } catch { ns = null }
-    }
-    if (!ns) {
-      die(`could not resolve GitLab namespace (glab auth login --hostname ${GITLAB_HOST}; VPN?). ` +
-        `To finish by hand: git remote add origin git@${GITLAB_HOST}:<namespace>/${name}.git && git push -u origin main`)
-    }
-    const visibility = o.private ? '--private' : '--internal'
-    log(`→ Creating ${GITLAB_HOST}/${ns}/${name} (${visibility.slice(2)})...`)
-    // GLAB_NO_PROMPT skips glab's "Create a local project directory?" question, which it asks
-    // even with --skipGitInit; unanswered it hangs non-interactive runs, and "yes" nests a stray repo.
-    run('glab', ['repo', 'create', `${ns}/${name}`, visibility, '--defaultBranch', 'main', '--skipGitInit'], {
-      cwd: dest,
-      env: { ...env, GLAB_NO_PROMPT: '1' },
+    remote = createGitlabRepo({
+      dest, name, host: GITLAB_HOST, group: o.group, private: o.private, noPush: o.noPush, log,
     })
-    // glab doesn't reliably wire the remote when starting from an existing local repo, so set it explicitly.
-    const url = `git@${GITLAB_HOST}:${ns}/${name}.git`
-    spawnSync('git', ['remote', 'remove', 'origin'], { cwd: dest, stdio: 'ignore' })
-    run('git', ['remote', 'add', 'origin', url], { cwd: dest })
-    if (o.noPush) log('→ --no-push given. Run: git push -u origin main')
-    else run('git', ['push', '-u', 'origin', 'main'], { cwd: dest })
-    remote = `https://${GITLAB_HOST}/${ns}/${name}`
     log(`✓ ${remote}`)
   }
 
@@ -161,9 +93,15 @@ async function scaffold(o) {
   if (o.json) log(JSON.stringify({ path: dest, remote, sailwind: pkg.version }))
 }
 
-const o = parse(process.argv.slice(2))
-const cmd = o._[0]
-if (o.help || !cmd) { log(HELP); process.exit(cmd || o.help ? 0 : 1) }
-if (cmd === 'doctor') doctor()
-else if (cmd === 'new') await scaffold(o)
-else die(`unknown command "${cmd}"\n\n${HELP}`)
+try {
+  const o = parse(process.argv.slice(2))
+  const cmd = o._[0]
+  if (o.help || !cmd) { log(HELP); process.exit(cmd || o.help ? 0 : 1) }
+  if (cmd === 'doctor') doctor()
+  else if (cmd === 'new') await scaffold(o)
+  else throw new CliError(`unknown command "${cmd}"`, { usage: true })
+} catch (e) {
+  if (!(e instanceof CliError)) throw e
+  console.error(`error: ${e.message}${e.usage ? `\n\n${HELP}` : ''}`)
+  process.exit(1)
+}

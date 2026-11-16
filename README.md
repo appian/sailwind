@@ -24,7 +24,7 @@ pnpm dlx @pglevy/sailwind new my-app --gitlab   # also creates an internal GitLa
 pnpm dlx @pglevy/sailwind doctor                # check node, pnpm, git, glab
 ```
 
-Options: `--dest <dir>` (default `~/Documents`), `--ref <branch|tag>`, `--no-install`, `--json`. With `--gitlab`: `--private` (default is internal), `--group <group>` (default is your personal namespace), `--no-push`. Set `SAILWIND_GITLAB_HOST` to use a different GitLab host. The new project's `@pglevy/sailwind` dependency is pinned to the CLI's own version, so the starter never lags the library.
+Options: `--dest <dir>` (default `~/Documents`), `--ref <branch|tag>`, `--no-install`, `--json`. With `--gitlab`: `--private` (default is internal), `--group <group>` (default is your personal namespace), `--no-push`. Set `SAILWIND_GITLAB_HOST` to use a different GitLab host. CLI tests live in `tests/cli/` (`pnpm run test:cli`). The new project's `@pglevy/sailwind` dependency is pinned to the CLI's own version, so the starter never lags the library.
 
 ### Installation
 
