@@ -27,7 +27,10 @@ Usage:
 Options for "new":
   --dest <dir>      Parent directory (default: ~/Documents)
   --ref <ref>       Starter branch/tag to use (default: main)
-  --gitlab          Also create an internal repo on ${GITLAB_HOST} (needs glab) and push
+  --gitlab          Also create a repo on ${GITLAB_HOST} (needs glab) and push
+  --private         With --gitlab: private instead of internal visibility
+  --group <group>   With --gitlab: create under this group instead of your namespace
+  --no-push         With --gitlab: create the repo and set origin, but don't push
   --no-install      Skip pnpm install
   --json            Print a JSON result on the last line
   -h, --help        Show this help
@@ -47,7 +50,10 @@ function parse(argv) {
     const a = argv[i]
     if (a === '--dest') o.dest = argv[++i]
     else if (a === '--ref') o.ref = argv[++i]
-    else if (['--gitlab', '--no-install', '--json'].includes(a)) o[a.slice(2).replace('no-install', 'noInstall')] = true
+    else if (a === '--group') o.group = argv[++i]
+    else if (['--gitlab', '--private', '--no-install', '--no-push', '--json'].includes(a)) {
+      o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true
+    }
     else if (a === '-h' || a === '--help') o.help = true
     else if (a.startsWith('-')) die(`unknown option ${a}\n\n${HELP}`)
     else o._.push(a)
@@ -77,6 +83,8 @@ async function scaffold(o) {
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) die('name may only contain letters, numbers, ".", "_" and "-"')
   for (const c of ['git', 'tar']) if (!has(c)) die(`${c} not found (run \`sailwind doctor\`)`)
   if (o.gitlab && !has('glab')) die('--gitlab needs glab (run `sailwind doctor`)')
+  if ((o.private || o.group || o.noPush) && !o.gitlab) die('--private, --group and --no-push only apply with --gitlab')
+  if (o.group === undefined && process.argv.includes('--group')) die('--group needs a value')
 
   const parent = resolve((o.dest || join(homedir(), 'Documents')).replace(/^~(?=\/|$)/, homedir()))
   const dest = join(parent, name)
@@ -111,6 +119,10 @@ async function scaffold(o) {
     run('pnpm', ['install'], { cwd: dest })
   }
 
+  // Safety net: pnpm install has already run, so never let node_modules get committed.
+  const gitignore = join(dest, '.gitignore')
+  if (!existsSync(gitignore)) writeFileSync(gitignore, 'node_modules\ndist\n.DS_Store\n')
+
   run('git', ['init', '-q', '-b', 'main'], { cwd: dest })
   run('git', ['add', '.'], { cwd: dest })
   run('git', ['commit', '-q', '-m', 'Initial commit from sailwind-starter'], { cwd: dest })
@@ -118,15 +130,29 @@ async function scaffold(o) {
   let remote = null
   if (o.gitlab) {
     const env = { ...process.env, GITLAB_HOST }
-    const who = spawnSync('glab', ['api', 'user'], { env, encoding: 'utf8' })
-    const ns = who.status === 0 ? JSON.parse(who.stdout).username : null
-    if (!ns) die(`could not read GitLab user (glab auth login --hostname ${GITLAB_HOST}; VPN?)`)
-    log(`→ Creating ${GITLAB_HOST}/${ns}/${name}...`)
-    run('glab', ['repo', 'create', `${ns}/${name}`, '--internal', '--defaultBranch', 'main'], { cwd: dest, env })
+    let ns = o.group
+    if (!ns) {
+      const who = spawnSync('glab', ['api', 'user'], { env, encoding: 'utf8' })
+      try { ns = who.status === 0 ? JSON.parse(who.stdout).username : null } catch { ns = null }
+    }
+    if (!ns) {
+      die(`could not resolve GitLab namespace (glab auth login --hostname ${GITLAB_HOST}; VPN?). ` +
+        `To finish by hand: git remote add origin git@${GITLAB_HOST}:<namespace>/${name}.git && git push -u origin main`)
+    }
+    const visibility = o.private ? '--private' : '--internal'
+    log(`→ Creating ${GITLAB_HOST}/${ns}/${name} (${visibility.slice(2)})...`)
+    // GLAB_NO_PROMPT skips glab's "Create a local project directory?" question, which it asks
+    // even with --skipGitInit; unanswered it hangs non-interactive runs, and "yes" nests a stray repo.
+    run('glab', ['repo', 'create', `${ns}/${name}`, visibility, '--defaultBranch', 'main', '--skipGitInit'], {
+      cwd: dest,
+      env: { ...env, GLAB_NO_PROMPT: '1' },
+    })
+    // glab doesn't reliably wire the remote when starting from an existing local repo, so set it explicitly.
     const url = `git@${GITLAB_HOST}:${ns}/${name}.git`
     spawnSync('git', ['remote', 'remove', 'origin'], { cwd: dest, stdio: 'ignore' })
     run('git', ['remote', 'add', 'origin', url], { cwd: dest })
-    run('git', ['push', '-u', 'origin', 'main'], { cwd: dest })
+    if (o.noPush) log('→ --no-push given. Run: git push -u origin main')
+    else run('git', ['push', '-u', 'origin', 'main'], { cwd: dest })
     remote = `https://${GITLAB_HOST}/${ns}/${name}`
     log(`✓ ${remote}`)
   }
