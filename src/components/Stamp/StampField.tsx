@@ -2,9 +2,9 @@ import * as React from 'react'
 import * as LucideIcons from 'lucide-react'
 import type { SAILLabelPosition, SAILMarginSize, SAILAlign, SAILShape, SAILColorInput, SAILDynamicLink } from '../../types/sail'
 import { mergeClasses } from '../../utils/classNames'
-import { resolveColorClass, isSemanticColor, isPaletteColor } from '../../utils/colorResolver'
+import { resolveColorClass, resolveColorToHex, getContrastColor, flattenHexAlpha, isSemanticColor, isPaletteColor } from '../../utils/colorResolver'
 import { marginAboveMap, marginBelowMap, alignMap } from '../../utils/sailMaps'
-import { useI18n, KEYS } from '../../i18n'
+import { HelpIcon } from '../shared/FieldIndicators'
 
 type StampSize = "TINY" | "SMALL" | "MEDIUM" | "LARGE"
 type StampBackgroundColor = SAILColorInput | "TRANSPARENT"
@@ -73,7 +73,6 @@ export const StampField: React.FC<StampFieldProps> = ({
   shape = "ROUNDED",
   className: classNameProp
 }) => {
-  const { t } = useI18n()
 
   // Visibility control
   if (!showWhen) return null
@@ -130,12 +129,23 @@ export const StampField: React.FC<StampFieldProps> = ({
     return { className: 'bg-blue-500' }
   }
 
+  // Default content color on the stamp's background. Palette and hex backgrounds pick light or dark
+  // text by contrast (#189); semantic backgrounds keep white, as before.
+  const getDefaultContentClass = (): string => {
+    if (backgroundColor === "TRANSPARENT") return 'text-gray-900'
+    if (isPaletteColor(backgroundColor) || backgroundColor.startsWith('#')) {
+      const hex = resolveColorToHex(backgroundColor)
+      if (hex && getContrastColor(flattenHexAlpha(hex)) === '#000000') return 'text-gray-900'
+    }
+    return 'text-white'
+  }
+
   // Content color mapping
   const getContentColor = (): { className?: string; style?: React.CSSProperties } => {
     // Semantic colors
     if (isSemanticColor(contentColor)) {
       if (contentColor === 'STANDARD') {
-        return { className: backgroundColor === "TRANSPARENT" ? 'text-gray-900' : 'text-white' }
+        return { className: getDefaultContentClass() }
       }
       return { className: resolveColorClass(contentColor, 'text') }
     }
@@ -151,7 +161,7 @@ export const StampField: React.FC<StampFieldProps> = ({
     }
 
     // Default fallback
-    return { className: backgroundColor === "TRANSPARENT" ? 'text-gray-900' : 'text-white' }
+    return { className: getDefaultContentClass() }
   }
 
   // Border for transparent background
@@ -314,15 +324,7 @@ export const StampField: React.FC<StampFieldProps> = ({
     return (
       <label className="text-base font-medium text-gray-900 block mb-2">
         {label}
-        {helpTooltip && (
-          <span
-            className="ml-2 text-gray-700 cursor-help"
-            title={helpTooltip}
-            aria-label={t(KEYS.fieldHelp)}
-          >
-            ℹ️
-          </span>
-        )}
+        {helpTooltip && <HelpIcon tooltip={helpTooltip} />}
       </label>
     )
   }
